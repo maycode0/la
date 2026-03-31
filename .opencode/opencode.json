@@ -1,0 +1,21 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "outApi": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "gpt_codex",
+      "options": {
+        "baseURL": "https://itncakjwhxxl.ap-northeast-1.clawcloudrun.com/v1",
+        "apiKey": "sk-ILDmLY9pDJHblwEv2"
+      },
+      "models": {
+        "gpt-5.4": {
+          "name": "gpt-5.4"
+        },
+        "gpt-5.3-codex": {
+          "name": "gpt-5.3-codex"
+        }
+      }
+    }
+  }
+}
