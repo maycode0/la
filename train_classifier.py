@@ -1,8 +1,17 @@
 import os
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+
 import sys
 import argparse
 import time
 import random
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"The torchvision\.datapoints and torchvision\.transforms\.v2 namespaces are still Beta.*",
+)
 
 import numpy as np
 import torch
@@ -15,6 +24,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import dataloader
 import modules
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
 from torch.utils.data import Dataset, DataLoader, SequentialSampler, TensorDataset
 from BERT.tokenization import BertTokenizer
 from BERT.modeling import BertForSequenceClassification, BertConfig
@@ -181,32 +191,40 @@ class NLIDataset_BERT(Dataset):
 
 
 class NLI_infer_RoBERTa(nn.Module):
-    def __init__(self, pretrained_dir, nclasses, max_seq_length=128, batch_size=32):
+    def __init__(self, pretrained_dir, nclasses, max_seq_length=128, batch_size=256):
         super(NLI_infer_RoBERTa, self).__init__()
         self.model = AutoModelForSequenceClassification.from_pretrained(pretrained_dir, num_labels=nclasses)
         self.model = self.model.to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_dir)
+        if self.tokenizer.pad_token is None:
+            if self.tokenizer.eos_token is not None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            else:
+                self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                self.model.resize_token_embeddings(len(self.tokenizer))
+        self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.max_seq_length = max_seq_length
 
-    def text_pred(self, text_data, batch_size=32):
+    def text_pred(self, text_data, batch_size=128):
         self.model.eval()
         probs_all = []
-        for text in text_data:
+        for start in range(0, len(text_data), batch_size):
+            batch_text = text_data[start:start + batch_size]
+            batch_strings = [' '.join(text) for text in batch_text]
             inputs = self.tokenizer(
-                ' '.join(text),
+                batch_strings,
                 return_tensors='pt',
                 max_length=self.max_seq_length,
                 truncation=True,
-                padding='max_length'
+                padding=True
             )
             inputs = {k: v.to(device) for k, v in inputs.items()}
             with torch.no_grad():
                 logits = self.model(**inputs).logits
-                probs = nn.functional.softmax(logits, dim=-1)
-                probs_all.append(probs)
+                probs_all.append(nn.functional.softmax(logits, dim=-1))
         return torch.cat(probs_all, dim=0)
 
-    def lime_text_pred(self, text_data, batch_size=32):
+    def lime_text_pred(self, text_data, batch_size=128):
         aa = []
         for i in text_data:
             aa.append(i.split(" "))

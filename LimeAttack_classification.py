@@ -1,6 +1,15 @@
+import os
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message=r"The torchvision\.datapoints and torchvision\.transforms\.v2 namespaces are still Beta.*",
+)
+
 import pickle
 import argparse
-import os
 import numpy as np
 import dataloader
 import criteria
@@ -14,6 +23,40 @@ from lime.lime_text import LimeTextExplainer
 
 parser = argparse.ArgumentParser()
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+class CachedPredictor:
+    def __init__(self, predictor, device):
+        self.predictor = predictor
+        self.device = device
+        self.cache = {}
+
+    def _key(self, text):
+        return tuple(text)
+
+    def __call__(self, text_data, batch_size=32):
+        outputs = [None] * len(text_data)
+        missing_texts = []
+        missing_indices = []
+
+        for idx, text in enumerate(text_data):
+            key = self._key(text)
+            cached = self.cache.get(key)
+            if cached is None:
+                missing_indices.append(idx)
+                missing_texts.append(text)
+            else:
+                outputs[idx] = cached
+
+        if missing_texts:
+            fresh_outputs = self.predictor(missing_texts, batch_size=batch_size).detach().cpu()
+            for idx, text, output in zip(missing_indices, missing_texts, fresh_outputs):
+                key = self._key(text)
+                cached_output = output.clone()
+                self.cache[key] = cached_output
+                outputs[idx] = cached_output
+
+        return torch.stack(outputs).to(self.device)
 
 
 def split_token(seq):
@@ -353,17 +396,23 @@ def run_attack():
         default_model_path = os.path.join(default_model_path,args.model_path)
         max_seq_length = 256
         model = NLI_infer_BERT(default_model_path, nclasses=args.nclasses, max_seq_length=max_seq_length)
+    # model.to(device)
+    model.eval()
 
-    predictor = model.text_pred
+    predictor = CachedPredictor(model.text_pred, device)
     lime_pred = model.lime_text_pred
     print('Start attacking...')
     starttime = datetime.datetime.now()
     print("model:{},data:{}".format(args.target_model,args.dataset_path))
     print("para->sim:{},synonyms_num:{},k:{}".format(args.sim,args.syn_num,args.k))
     right = 0
-    for idx,(text,true_label) in enumerate(data):
-        if torch.argmax(predictor([text]).squeeze())==true_label:
-            right+=1
+    batch_size = 32
+    for start in range(0, len(data), batch_size):
+        batch = data[start:start + batch_size]
+        batch_texts = [text for text, _ in batch]
+        batch_labels = torch.tensor([label for _, label in batch])
+        preds = torch.argmax(predictor(batch_texts, batch_size=batch_size), dim=-1).cpu()
+        right += (preds == batch_labels).sum().item()
     print("origin acc:{}".format(right/len(data)))
 
     orig_texts = []
@@ -375,7 +424,7 @@ def run_attack():
         if idx % 100 == 0 and idx != 0:
             evaluation(attack_result,args.query_budget)
         orig_texts.append(text)
-        res = attack(idx,fail,text, true_label, predictor, lime_pred,criteria.filter_words, word2idx_rev, idx2word_vocab, cos_sim,import_score_threshold=-100, sim_score_threshold=args.sim, synonyms_num=args.syn_num,batch_size=32,pos = args.pos, k=args.k,query_budget = args.query_budget)
+        res = attack(idx,fail,text, true_label, predictor, lime_pred,criteria.filter_words, word2idx_rev, idx2word_vocab, cos_sim,import_score_threshold=-100, sim_score_threshold=args.sim, synonyms_num=args.syn_num,batch_size=batch_size,pos = args.pos, k=args.k,query_budget = args.query_budget)
         attack_result.append(res)
 
     endtime = datetime.datetime.now()
